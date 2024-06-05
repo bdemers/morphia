@@ -17,10 +17,11 @@ import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.MongoDBContainer;
 import org.testcontainers.utility.DockerImageName;
 import org.testng.SkipException;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.AfterSuite;
+import org.testng.annotations.BeforeClass;
 import org.testng.annotations.BeforeSuite;
 
-import static dev.morphia.test.TestBase.TEST_DB_NAME;
 import static java.lang.String.format;
 import static java.util.Arrays.stream;
 
@@ -28,43 +29,65 @@ import static java.util.Arrays.stream;
 public class MorphiaTestSetup {
     private static final Logger LOG = LoggerFactory.getLogger(MorphiaTestSetup.class);
 
-    private static MongoHolder mongoHolder;
+    /**
+     * Suite level mongo holder used to manage Mongo Test Container.
+     */
+    private static MongoHolder suiteMongoHolder;
+
+    /**
+     * Class level mongo holder with unique db/connection string per class.
+     */
+    private MongoHolder classMongoHolder;
 
     private MorphiaContainer morphiaContainer;
     private MorphiaConfig morphiaConfig;
+    private final String testDBName;
 
     public MorphiaTestSetup() {
-        morphiaConfig = buildConfig()
-                .codecProvider(new ZDTCodecProvider());
+        this(buildConfig()
+                .codecProvider(new ZDTCodecProvider()));
     }
 
     public MorphiaTestSetup(MorphiaConfig config) {
-        morphiaConfig = config;
+        // generate a unique db name for this test class (max of 63 chars)
+        String testClassName = getClass().getName().replaceAll("\\.", "-");
+        if (testClassName.length() > 63) {
+            testClassName = testClassName.substring(testClassName.length() - 63);
+        }
+        testDBName = testClassName;
+        morphiaConfig = config.database(testClassName);
+    }
+
+    protected String getTestDBName() {
+        return testDBName;
     }
 
     @BeforeSuite
-    public MorphiaContainer getMorphiaContainer() {
-        if (morphiaContainer == null) {
-            morphiaContainer = new MorphiaContainer(getMongoHolder().getMongoClient(), morphiaConfig);
-        }
+    public void setupMorphiaTestContainer() {
+        suiteMongoHolder = initMongoDbContainer(false, getTestDBName());
+    }
 
+    @BeforeClass
+    public void setupConnections() {
+        morphiaContainer = new MorphiaContainer(suiteMongoHolder.getMongoClient(), morphiaConfig);
+        classMongoHolder = new MongoHolder(null, suiteMongoHolder.connectionString(getTestDBName()));
+    }
+
+    public MorphiaContainer getMorphiaContainer() {
         return morphiaContainer;
     }
 
     public MongoHolder getMongoHolder() {
-        if (mongoHolder == null || !mongoHolder.isAlive()) {
-            mongoHolder = initMongoDbContainer(false);
-        }
-        return mongoHolder;
+        return classMongoHolder;
     }
 
-    private static MongoHolder initMongoDbContainer(boolean sharded) {
+    private static MongoHolder initMongoDbContainer(boolean sharded, String dbName) {
         String mongodb = System.getProperty("mongodb");
         String connectionString;
         MongoDBContainer mongoDBContainer = null;
         if ("local".equals(mongodb)) {
             LOG.info("'local' mongodb property specified. Using local server.");
-            connectionString = "mongodb://localhost:27017/" + TEST_DB_NAME;
+            connectionString = "mongodb://localhost:27017/" + dbName;
         } else {
             DockerImageName imageName;
             try {
@@ -84,14 +107,24 @@ public class MorphiaTestSetup {
                         .withSharding();
             }
             mongoDBContainer.start();
-            connectionString = mongoDBContainer.getReplicaSetUrl(TEST_DB_NAME);
+            connectionString = mongoDBContainer.getReplicaSetUrl(dbName);
         }
         return new MongoHolder(mongoDBContainer, connectionString);
     }
 
+    @AfterClass
+    public void stopHolder() {
+        if (classMongoHolder != null) {
+            classMongoHolder.close();
+        }
+        classMongoHolder = null;
+    }
+
     @AfterSuite
     public void stopContainer() {
-        morphiaContainer = null;
+        if (suiteMongoHolder != null) {
+            suiteMongoHolder.close();
+        }
     }
 
     protected void assumeTrue(boolean condition, String message) {
@@ -134,14 +167,11 @@ public class MorphiaTestSetup {
     }
 
     protected void withSharding(Runnable body) {
-        var oldHolder = mongoHolder;
         var oldContainer = morphiaContainer;
-        try (var holder = initMongoDbContainer(true)) {
-            mongoHolder = holder;
-            morphiaContainer = new MorphiaContainer(mongoHolder.getMongoClient(), MorphiaConfig.load());
+        try (var holder = initMongoDbContainer(true, getTestDBName())) {
+            morphiaContainer = new MorphiaContainer(holder.getMongoClient(), MorphiaConfig.load());
             body.run();
         } finally {
-            mongoHolder = oldHolder;
             morphiaContainer = oldContainer;
         }
     }
@@ -161,8 +191,10 @@ public class MorphiaTestSetup {
 
     protected void withConfig(MorphiaConfig config, Runnable body) {
         var oldContainer = morphiaContainer;
+        var oldHolder = classMongoHolder;
         try {
-            morphiaContainer = new MorphiaContainer(mongoHolder.getMongoClient(), config);
+            config = config.database(getTestDBName());
+            morphiaContainer = new MorphiaContainer(classMongoHolder.getMongoClient(), config);
             if (config instanceof MorphiaTestConfig testConfig) {
                 List<Class<?>> classes = testConfig.classes();
                 if (classes != null) {
@@ -175,12 +207,12 @@ public class MorphiaTestSetup {
             body.run();
         } finally {
             morphiaContainer = oldContainer;
+            classMongoHolder = oldHolder;
         }
     }
 
     protected static MorphiaConfig buildConfig(Class<?>... types) {
-        MorphiaConfig config = new ManualMorphiaTestConfig()
-                .database(TEST_DB_NAME);
+        MorphiaConfig config = new ManualMorphiaTestConfig();
         if (types.length != 0)
             config = config
                     .packages(stream(types)

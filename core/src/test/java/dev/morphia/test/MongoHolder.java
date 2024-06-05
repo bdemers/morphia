@@ -43,4 +43,12 @@ class MongoHolder implements AutoCloseable {
         }
         return mongoClient;
     }
+
+    String connectionString(String dbName) {
+        if (mongoDBContainer != null) {
+            return mongoDBContainer.getReplicaSetUrl(dbName);
+        } else {
+            return "mongodb://localhost:27017/" + dbName;
+        }
+    }
 }

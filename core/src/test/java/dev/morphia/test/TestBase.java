@@ -47,7 +47,6 @@ import static org.testng.Assert.fail;
 
 public abstract class TestBase extends MorphiaTestSetup {
     private static final Logger LOG = LoggerFactory.getLogger(TestBase.class);
-    protected static final String TEST_DB_NAME = "morphia_test";
 
     public static File GIT_ROOT = new File(".").getAbsoluteFile();
     protected static File CORE_ROOT;
